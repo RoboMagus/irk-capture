@@ -36,6 +36,7 @@ class IRKCaptureComponent;
 enum class BLEProfile : uint8_t {
   HEART_SENSOR = 0,  // Heart Rate Sensor (default)
   KEYBOARD = 1,      // Logitech K380 Keyboard
+  SOUND = 2,         // Audio receiver
 };
 
 // Select for BLE profile

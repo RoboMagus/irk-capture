@@ -179,6 +179,7 @@ static constexpr uint16_t UUID_CHR_MODEL_NUMBER = 0x2A24;
 static constexpr uint16_t UUID_SVC_BATTERY = 0x180F;
 static constexpr uint16_t UUID_CHR_BATTERY_LEVEL = 0x2A19;
 static constexpr uint16_t UUID_SVC_HID = 0x1812;  // Human Interface Device (for Keyboard profile)
+static constexpr uint16_t UUID_SVC_SOUND = 0xfeb9;
 
 // BLE Appearance values
 static constexpr uint16_t APPEARANCE_HEART_RATE_SENSOR = 0x0340;
@@ -216,6 +217,8 @@ static const ble_uuid16_t UUID_CHR_BATT_LVL = BLE_UUID16_INIT(UUID_CHR_BATTERY_L
 
 // HID service for Keyboard profile
 static const ble_uuid16_t UUID_SVC_HID_BLE = BLE_UUID16_INIT(UUID_SVC_HID);
+static const ble_uuid16_t UUID_SVC_SOUND_BLE = BLE_UUID16_INIT(UUID_SVC_SOUND);
+
 
 // Optional protected service/characteristic to force pairing via READ_ENC
 static const ble_uuid128_t UUID_SVC_PROT = BLE_UUID128_INIT(
@@ -246,6 +249,20 @@ int handle_gap_repeat_pairing(IRKCaptureComponent* self, struct ble_gap_event* e
 
 static inline uint32_t now_ms() {
   return (uint32_t) (esp_timer_get_time() / 1000ULL);
+}
+
+const char * profile2str(BLEProfile p) {
+  switch (p) {
+    case BLEProfile::HEART_SENSOR:
+      return "Heart Sensor";
+    case BLEProfile::KEYBOARD:
+      return "Keyboard";
+    case BLEProfile::SOUND:
+      return "Sound";
+    default:
+      return "?";
+  }
+  
 }
 
 // Wraparound-safe "has deadline passed?" check for 32-bit ms timestamps.
@@ -734,6 +751,35 @@ static struct ble_gatt_svc_def gatt_svcs_keyboard[] = {
   { 0 }
 };
 
+// Sound profile GATT services
+static struct ble_gatt_svc_def gatt_svcs_sound[] = {
+  {
+      // HID service
+      .type = BLE_GATT_SVC_TYPE_PRIMARY,
+      .uuid = &UUID_SVC_SOUND_BLE.u,
+      .characteristics = nullptr,
+  },
+  {
+      // Device Information service
+      .type = BLE_GATT_SVC_TYPE_PRIMARY,
+      .uuid = &UUID_SVC_DEVINFO.u,
+      .characteristics = devinfo_chrs,
+  },
+  {
+      // Battery service
+      .type = BLE_GATT_SVC_TYPE_PRIMARY,
+      .uuid = &UUID_SVC_BAS.u,
+      .characteristics = batt_chrs,
+  },
+  {
+      // Protected service (forces pairing via encrypted read)
+      .type = BLE_GATT_SVC_TYPE_PRIMARY,
+      .uuid = &UUID_SVC_PROT.u,
+      .characteristics = prot_chrs,
+  },
+  { 0 }
+};
+
 //======================== Access callbacks ========================
 
 int chr_read_devinfo(uint16_t conn_handle, uint16_t, struct ble_gatt_access_ctxt* ctxt, void* arg) {
@@ -891,8 +937,10 @@ void IRKCaptureSelect::control(const std::string& value) {
     parent_->set_ble_profile(BLEProfile::HEART_SENSOR);
   } else if (value == "Keyboard") {
     parent_->set_ble_profile(BLEProfile::KEYBOARD);
+  } else if (value == "Sound") {
+    parent_->set_ble_profile(BLEProfile::SOUND);
   } else {
-    ESP_LOGW(TAG, "Invalid BLE profile value: '%s' (expected 'Heart Sensor' or 'Keyboard')",
+    ESP_LOGW(TAG, "Invalid BLE profile value: '%s' (expected 'Heart Sensor', 'Sound' or 'Keyboard')",
              value.c_str());
     return;  // Don't publish invalid state to Home Assistant
   }
@@ -1313,10 +1361,9 @@ void IRKCaptureComponent::setup() {
   if (nvs_open("irk_capture", NVS_READONLY, &nvs_handle) == ESP_OK) {
     uint8_t profile_val = 0;
     if (nvs_get_u8(nvs_handle, "ble_profile", &profile_val) == ESP_OK) {
-      if (profile_val <= static_cast<uint8_t>(BLEProfile::KEYBOARD)) {
+      if (profile_val <= static_cast<uint8_t>(BLEProfile::SOUND)) {
         ble_profile_ = static_cast<BLEProfile>(profile_val);
-        ESP_LOGI(TAG, "Loaded persisted BLE profile: %s",
-                 ble_profile_ == BLEProfile::KEYBOARD ? "Keyboard" : "Heart Sensor");
+        ESP_LOGI(TAG, "Loaded persisted BLE profile: %s", profile2str(ble_profile_));
       } else {
         ESP_LOGW(TAG, "Invalid persisted profile value %u, using default", profile_val);
       }
@@ -1348,8 +1395,7 @@ void IRKCaptureComponent::setup() {
   }
   if (ble_profile_select_) {
     // Initialize select to persisted profile
-    ble_profile_select_->publish_state(ble_profile_ == BLEProfile::KEYBOARD ? "Keyboard"
-                                                                            : "Heart Sensor");
+    ble_profile_select_->publish_state(profile2str(ble_profile_));
   }
 }
 
@@ -1367,8 +1413,7 @@ void IRKCaptureComponent::dump_config() {
 
   const char* effective_name =
       (current_profile == BLEProfile::KEYBOARD) ? "Logitech K380" : name_copy.c_str();
-  const char* profile_name =
-      (current_profile == BLEProfile::KEYBOARD) ? "Keyboard" : "Heart Sensor";
+  const char* profile_name = profile2str(current_profile);
 
   // Single consolidated log line avoids UART buffer overflow without vTaskDelay hacks
   ESP_LOGCONFIG(TAG, "IRK Capture v%s: profile=%s name='%s' adv=%s", VERSION, profile_name,
@@ -1719,12 +1764,19 @@ void IRKCaptureComponent::register_gatt_services() {
 
   struct ble_gatt_svc_def* gatt_svcs;
   const char* profile_name;
-  if (current_profile == BLEProfile::KEYBOARD) {
-    gatt_svcs = gatt_svcs_keyboard;
-    profile_name = "Keyboard";
-  } else {
-    gatt_svcs = gatt_svcs_heart_sensor;
-    profile_name = "Heart Sensor";
+  switch (current_profile) {
+    case BLEProfile::KEYBOARD:
+      gatt_svcs = gatt_svcs_keyboard;
+      profile_name = "Keyboard";
+      break;
+    case BLEProfile::SOUND:
+      gatt_svcs = gatt_svcs_sound;
+      profile_name = "Sound";
+      break;
+    default:
+      gatt_svcs = gatt_svcs_heart_sensor;
+      profile_name = "Heart Sensor";
+      break;
   }
 
   ESP_LOGI(TAG, "Registering GATT services for %s profile", profile_name);
@@ -1772,41 +1824,63 @@ void IRKCaptureComponent::start_advertising() {
   memset(&rsp_fields, 0, sizeof(rsp_fields));
   bool use_scan_response = false;
 
-  if (current_profile == BLEProfile::KEYBOARD) {
-    // Keyboard profile: Logitech K380
-    // Move name to scan response to stay within 31-byte advertising packet limit
-    profile_name = "Keyboard";
-    static const char* keyboard_name = "Logitech K380";
-    ble_svc_gap_device_name_set(keyboard_name);
+  switch(current_profile) {
+    case BLEProfile::KEYBOARD:
+      // Keyboard profile: Logitech K380
+      // Move name to scan response to stay within 31-byte advertising packet limit
+      profile_name = "Keyboard";
+      static const char* keyboard_name = "Logitech K380";
+      ble_svc_gap_device_name_set(keyboard_name);
 
-    // Advertising data: flags, appearance, HID service UUID (keep small)
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.appearance = 0x03C1;  // Keyboard
-    fields.appearance_is_present = 1;
-    fields.uuids16 = const_cast<ble_uuid16_t*>(&UUID_SVC_HID_BLE);
-    fields.num_uuids16 = 1;
-    fields.uuids16_is_complete = 1;
-    // Do NOT put name in advertising packet - put it in scan response
+      // Advertising data: flags, appearance, HID service UUID (keep small)
+      fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+      fields.appearance = 0x03C1;  // Keyboard
+      fields.appearance_is_present = 1;
+      fields.uuids16 = const_cast<ble_uuid16_t*>(&UUID_SVC_HID_BLE);
+      fields.num_uuids16 = 1;
+      fields.uuids16_is_complete = 1;
+      // Do NOT put name in advertising packet - put it in scan response
 
-    // Scan response data: device name (separate 31-byte budget)
-    rsp_fields.name = (uint8_t*) keyboard_name;
-    rsp_fields.name_len = strlen(keyboard_name);
-    rsp_fields.name_is_complete = 1;
-    use_scan_response = true;
-  } else {
-    // Heart Sensor profile (default): Use configured BLE name
-    profile_name = "Heart Sensor";
-    ble_svc_gap_device_name_set(name_copy.c_str());
+      // Scan response data: device name (separate 31-byte budget)
+      rsp_fields.name = (uint8_t*) keyboard_name;
+      rsp_fields.name_len = strlen(keyboard_name);
+      rsp_fields.name_is_complete = 1;
+      use_scan_response = true;
+    
+    case BLEProfile::SOUND:
+      profile_name = "Sound"
+      ble_svc_gap_device_name_set(name_copy.c_str());
 
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name = (uint8_t*) name_copy.c_str();
-    fields.name_len = (uint8_t) name_copy.size();
-    fields.name_is_complete = 1;
-    fields.appearance = APPEARANCE_HEART_RATE_SENSOR;
-    fields.appearance_is_present = 1;
-    fields.uuids16 = const_cast<ble_uuid16_t*>(&UUID_SVC_HR);
-    fields.num_uuids16 = 1;
-    fields.uuids16_is_complete = 1;
+      // Advertising data: flags, appearance, HID service UUID (keep small)
+      fields.flags = BLE_HS_ADV_F_DISC_GEN;
+      fields.appearance = 0x03C1;  // Keyboard
+      fields.appearance_is_present = 1;
+      fields.uuids16 = const_cast<ble_uuid16_t*>(&UUID_SVC_SOUND_BLE);
+      fields.num_uuids16 = 1;
+      fields.uuids16_is_complete = 1;
+      // Do NOT put name in advertising packet - put it in scan response
+
+      // Scan response data: device name (separate 31-byte budget)
+      rsp_fields.name = (uint8_t*) name_copy.c_str();
+      rsp_fields.name_len = strlen(name_copy.c_str());
+      rsp_fields.name_is_complete = 1;
+      use_scan_response = true;
+    
+    default:
+      // Heart Sensor profile (default): Use configured BLE name
+      profile_name = "Heart Sensor";
+      ble_svc_gap_device_name_set(name_copy.c_str());
+
+      fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+      fields.name = (uint8_t*) name_copy.c_str();
+      fields.name_len = (uint8_t) name_copy.size();
+      fields.name_is_complete = 1;
+      fields.appearance = APPEARANCE_HEART_RATE_SENSOR;
+      fields.appearance_is_present = 1;
+      fields.uuids16 = const_cast<ble_uuid16_t*>(&UUID_SVC_HR);
+      fields.num_uuids16 = 1;
+      fields.uuids16_is_complete = 1;
+      break;
   }
 
   int rc = ble_gap_adv_set_fields(&fields);
@@ -1966,7 +2040,7 @@ void IRKCaptureComponent::set_ble_profile(BLEProfile profile) {
     current_name = ble_name_;
   }
 
-  const char* profile_name = (profile == BLEProfile::HEART_SENSOR) ? "Heart Sensor" : "Keyboard";
+  const char* profile_name = profile2str(profile);
   ESP_LOGI(TAG, "BLE profile changed to: %s", profile_name);
 
   // Only trigger changes if profile actually changed
@@ -1988,7 +2062,8 @@ void IRKCaptureComponent::set_ble_profile(BLEProfile profile) {
       if (ble_name_text_) {
         ble_name_text_->publish_state("Logitech K380");
       }
-    } else {
+    }
+    else {
       // Heart Sensor profile restores the configured name
       if (ble_name_text_) {
         ble_name_text_->publish_state(current_name);
