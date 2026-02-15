@@ -1848,7 +1848,7 @@ void IRKCaptureComponent::start_advertising() {
       use_scan_response = true;
     
     case BLEProfile::SOUND:
-      profile_name = "Sound"
+      profile_name = "Sound";
       ble_svc_gap_device_name_set(name_copy.c_str());
 
       // Advertising data: flags, appearance, HID service UUID (keep small)
